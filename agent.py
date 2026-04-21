@@ -1,6 +1,4 @@
-# =========================
 # IMPORTS
-# =========================
 from typing import TypedDict, List
 from sentence_transformers import SentenceTransformer
 import chromadb
