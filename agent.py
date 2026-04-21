@@ -28,7 +28,7 @@ class AgentState(TypedDict):
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
 client = chromadb.Client()
-collection = client.create_collection("study_assistant")
+collection = client.get_or_create_collection("study_assistant")
 
 
 def load_documents(folder_path="data"):
@@ -71,7 +71,7 @@ def setup_rag():
     except:
         pass
 
-    collection = client.create_collection("study_assistant")
+    collection = client.get_or_create_collection("study_assistant")
 
     docs = load_documents("data")
 
