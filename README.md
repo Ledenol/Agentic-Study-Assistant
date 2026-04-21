@@ -21,9 +21,9 @@ This project is an AI-powered study assistant that answers questions from upload
 - Groq API
 - Streamlit
 
+This project enforces strict grounding and avoids hallucination by rejecting answers not present in retrieved context.
+
 ## How to Run
 ```bash
 pip install -r requirements.txt
 streamlit run capstone_streamlit.py
-
-This project enforces strict grounding and avoids hallucination by rejecting answers not present in retrieved context.
