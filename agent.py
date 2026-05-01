@@ -7,24 +7,25 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_groq import ChatGroq
+from duckduckgo_search import DDGS
 import os
 
-# LLM 
+# LLM
 llm = ChatGroq(
     model="llama-3.1-8b-instant",
-    api_key="API_KEY_HERE"
+    api_key=os.getenv("GROQ_API_KEY")
 )
+
 # STATE
 class AgentState(TypedDict):
     question: str
     messages: List[str]
     retrieved: str
+    tool_result: str
     answer: str
-    eval_retries: int
 
 # RAG SETUP
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
-
 client = chromadb.Client()
 collection = client.get_or_create_collection("study_assistant")
 
@@ -38,13 +39,16 @@ def load_documents(folder_path="data"):
     for file in os.listdir(folder_path):
         path = os.path.join(folder_path, file)
 
-        if file.endswith(".pdf"):
-            loader = PyPDFLoader(path)
-            documents.extend(loader.load())
+        try:
+            if file.endswith(".pdf"):
+                loader = PyPDFLoader(path)
+                documents.extend(loader.load())
 
-        elif file.endswith(".txt"):
-            loader = TextLoader(path)
-            documents.extend(loader.load())
+            elif file.endswith(".txt"):
+                loader = TextLoader(path, encoding="utf-8")
+                documents.extend(loader.load())
+        except:
+            continue
 
     return documents
 
@@ -78,7 +82,6 @@ def setup_rag():
 
     chunks = chunk_documents(docs)
     texts = [c.page_content for c in chunks]
-
     embeddings = embed_texts(texts)
 
     collection.add(
@@ -87,7 +90,7 @@ def setup_rag():
         ids=[f"id_{i}" for i in range(len(texts))]
     )
 
-# RETRIEVAL (STRICT)
+# RETRIEVAL
 def retrieve_docs(query, k=3):
     query_embedding = embed_texts([query])
 
@@ -97,11 +100,18 @@ def retrieve_docs(query, k=3):
     )
 
     docs = results["documents"][0]
-
-    # Filter weak results
     docs = [d for d in docs if d and len(d.strip()) > 30]
 
     return "\n".join(docs)
+
+# WEB TOOL
+def web_search(query):
+    try:
+        with DDGS() as ddgs:
+            results = ddgs.text(query, max_results=3)
+            return "\n".join([r["body"] for r in results])
+    except:
+        return "No results found."
 
 # NODES
 def memory_node(state: AgentState):
@@ -110,50 +120,43 @@ def memory_node(state: AgentState):
     return {"messages": msgs[-6:]}
 
 
-# 🔥 FORCE RAG ONLY
 def retrieval_node(state: AgentState):
     docs = retrieve_docs(state["question"])
     return {"retrieved": docs}
 
 
+def tool_node(state: AgentState):
+    result = web_search(state["question"])
+    return {"tool_result": result}
+
+
+def router(state: AgentState):
+    context = state.get("retrieved", "")
+    if not context or len(context.strip()) < 20:
+        return "tool"
+    return "answer"
+
+
 def answer_node(state: AgentState):
     context = state.get("retrieved", "")
+    tool_data = state.get("tool_result", "")
 
+    source = context if context else tool_data
 
-    if not context or len(context.strip()) < 20:
-        return {
-            "answer": "I don't know based on the provided documents."
-        }
+    if not source:
+        return {"answer": "I don't know."}
 
     prompt = f"""
-You are a STRICT study assistant.
+Answer using ONLY the provided information.
 
-RULES:
-- Answer ONLY from the context
-- DO NOT use prior knowledge
-- DO NOT guess
-- If not clearly in context, say:
-"I don't know based on the provided documents."
+{source}
 
-Context:
-{context}
-
-Question:
-{state['question']}
+Question: {state['question']}
 """
 
     response = llm.invoke(prompt)
 
     return {"answer": response.content}
-
-
-def eval_node(state: AgentState):
-    # simple eval (enough for capstone)
-    retries = state.get("eval_retries", 0) + 1
-
-    return {
-        "eval_retries": retries
-    }
 
 
 def save_node(state: AgentState):
@@ -167,16 +170,25 @@ def build_agent():
 
     graph.add_node("memory", memory_node)
     graph.add_node("retrieve", retrieval_node)
+    graph.add_node("tool", tool_node)
     graph.add_node("answer", answer_node)
-    graph.add_node("eval", eval_node)
     graph.add_node("save", save_node)
 
     graph.set_entry_point("memory")
 
     graph.add_edge("memory", "retrieve")
-    graph.add_edge("retrieve", "answer")
-    graph.add_edge("answer", "eval")
-    graph.add_edge("eval", "save")
+
+    graph.add_conditional_edges(
+        "retrieve",
+        router,
+        {
+            "answer": "answer",
+            "tool": "tool"
+        }
+    )
+
+    graph.add_edge("tool", "answer")
+    graph.add_edge("answer", "save")
     graph.add_edge("save", END)
 
     memory = MemorySaver()
@@ -191,10 +203,8 @@ def ask(question, thread_id="1"):
     result = app.invoke(
         {
             "question": question,
-            "messages": [],
-            "eval_retries": 0
+            "messages": []
         },
         config={"configurable": {"thread_id": thread_id}}
     )
-
     return result["answer"]
